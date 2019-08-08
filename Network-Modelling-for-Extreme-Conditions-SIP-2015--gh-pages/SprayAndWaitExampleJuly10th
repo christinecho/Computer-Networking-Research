@@ -1,0 +1,350 @@
+/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2013 Mohammed J.F. Alenazi
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation;
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ *
+ * Author: Mohammed J.F. Alenazi  <malenazi@ittc.ku.edu>
+ *
+ * James P.G. Sterbenz <jpgs@ittc.ku.edu>, director
+ * ResiliNets Research Group  http://wiki.ittc.ku.edu/resilinets
+ * Information and Telecommunication Technology Center (ITTC)
+ * and Department of Electrical Engineering and Computer Science
+ * The University of Kansas Lawrence, KS USA.
+ *
+ * Work supported by King Saud University and
+ * the ITTC at The University of Kansas.
+ */
+
+#include "ns3/core-module.h"
+#include "ns3/network-module.h"
+#include "ns3/applications-module.h"
+#include "ns3/mobility-module.h"
+#include "ns3/wifi-module.h"
+#include "ns3/internet-module.h"
+#include "ns3/epidemic-helper.h"
+#include "ns3/flow-monitor-module.h"
+#include "ns3/SprayAndWait-helper.h"
+#include "ns3/sprayandwait.h"
+#include "ns3/sprayandwaitpacket.h"
+
+
+
+using namespace ns3;
+
+/**
+ \file
+ \ingroup SprayAndWait
+ This example creates an N-node wireless network, which is set by default
+ to 10 nodes. The mobility model can be either static Grid or Randomwaypoint,
+ which by default is selected to be Grid. For the static grid, nodes are
+ placed in a grid of node with 100 m distance. For the Randomwaypoint,
+ the initial positions are randomly uniformly distributed within an area
+ of 300x1500 m. The data traffic is generated using OnOff application
+ and received by PacketSink. There is one source and one sink in this
+ configuration. The example runs for 100 seconds, and data is sent from
+ time 10 to 15 seconds, with the extra time in the example allocated to
+ allow the SprayAndWait routing to eventually deliver the packets.
+ */
+
+
+NS_LOG_COMPONENT_DEFINE ("SprayAndWaitExample");
+int main (int argc, char *argv[])
+{
+    // General parameters
+    std::string mobility_model = "RandomWaypoint";  // Grid or RandomWaypoint or RandomWalk
+    uint32_t nWifis = 50;
+    double txpDistance = 150.0;
+    //double minSpeed  = 0.5;
+    double nodeSpeed = 1.5;
+    bool app_logging = true;
+    ns3::NodeContainer nodeContainer;
+    ns3::NetDeviceContainer devices;
+    double duration = 100;
+    //double duration = 100;
+    //double maxX = 1000, maxY = 1000;
+    //uint32_t cc;
+    std::string name_cc;
+    
+    
+    // SprayAndWait parameters
+    uint32_t epidemicHopCount = 50;
+    uint32_t epidemicQueueLength = 20;
+    Time epidemicQueueEntryExpireTime = ns3::Seconds (duration);
+    Time epidemicBeaconInterval = ns3::Seconds (1);
+    
+    // Application parameters
+    std::string rate = "0.5Mbps";
+    uint32_t packetSize = 50;
+    double appTotaltime = duration;
+    //double ontime = 1.0;
+    //double offtime = 100.0;
+    //double appDataStart = 10.0;
+    //double appDataEnd = 15;
+    uint32_t source_num = 0;
+    uint32_t sink_num = 9;
+    uint32_t interval = 10;
+    
+    /*
+     // General parameters
+     std::string mobility_model = "RandomWaypoint";  // Grid or RandomWaypoint
+     uint32_t nWifis = 10;
+     double txpDistance = 120.0;
+     double nodeSpeed = 50.0;
+     bool app_logging = true;
+     NodeContainer nodeContainer;
+     NetDeviceContainer devices;
+     
+     
+     
+     // SprayAndWait parameters
+     uint32_t epidemicHopCount = 50;
+     uint32_t epidemicQueueLength = 50;
+     time epidemicQueueEntryExpiretime = Seconds (duration);
+     time epidemicBeaconInterval = Seconds (1);
+     
+     // Application parameters
+     std::string rate = "0.512kbps";
+     uint32_t packetSize = 64;
+     //double appTotaltime = 100.0;
+     //double appDataStart = 10.0;
+     //double appDataEnd = 15;
+     uint32_t source_num = 0;
+     uint32_t sink_num = 9;
+     */
+    
+    /*
+     Allow users to override the default parameters and set it to
+     new ones from CommandLine.
+     */
+    ns3::CommandLine cmd;
+    cmd.Usage ("Simple example shows basic SprayAndWait routing scenario.  "
+               "This example creates an N-node wireless network, which is set by "
+               "default to 10 nodes.  The mobility model can be either static Grid "
+               "or Randomwaypoint, which by default is selected to be Grid.  For "
+               "the static grid, nodes are placed in a grid of node with 100 m distance."
+               "For the Randomwaypoint, the initial positions are randomly uniformly "
+               "distributed within an area of 300x1500 m.The data traffic is generated "
+               "using OnOff application and received by PacketSink. There is one source "
+               "and one sink in this configuration. The example runs for 100 seconds, "
+               "and data is sent from time 10 to 15 seconds, with the extra time in "
+               "the example allocated to allow the SprayAndWait routing to eventually "
+               "deliver the packets.\n");
+    cmd.AddValue ("nWifis", "Number of wifi nodes", nWifis);
+    cmd.AddValue ("txpDistance", "Specify node's transmit range", txpDistance);
+    cmd.AddValue ("Source", "specify Source traffic node", source_num);
+    cmd.AddValue ("Sink", "specify SINK traffic node", sink_num);
+    cmd.AddValue ("rate", "CBR traffic rate(in kbps)", rate);
+    cmd.AddValue ("packetSize", "The packet size", packetSize);
+    cmd.AddValue ("nodeSpeed", "Node speed in RandomWayPoint model", nodeSpeed);
+    cmd.AddValue ("Hop Count", "number of hops before a packet is dropped",
+                  epidemicHopCount);
+    cmd.AddValue ("QueueLength", "Specify queue Length", epidemicQueueLength);
+    cmd.AddValue ("QueueEntryExpireTime", "Specify queue Entry Expire time",
+                  epidemicQueueEntryExpireTime);
+    cmd.AddValue ("BeaconInterval", "Specify beaconInterval",
+                  epidemicBeaconInterval);
+    cmd.Parse (argc, argv);
+    
+    
+    
+    
+    if (source_num >= nWifis)
+    {
+        std::cerr << "Source number can not exceed number of nodes" << std::endl;
+        exit (-1);
+    }
+    
+    if (sink_num >= nWifis || source_num >= nWifis)
+    {
+        std::cerr << "Sink number can not exceed number of nodes" << std::endl;
+        exit (-1);
+    }
+    
+    
+    
+    std::cout << "Number of wifi nodes: " << nWifis << std::endl;
+    std::cout << "Source number: " << source_num << std::endl;
+    std::cout << "Sink number: " << sink_num << std::endl;
+    std::cout << "Node speed: " << nodeSpeed << " m/s" << std::endl;
+    std::cout << "Packet size: " << packetSize << " b" << std::endl;
+    std::cout << "Transmission distance: " << txpDistance << " m" << std::endl;
+    std::cout << "Hop count: " << epidemicHopCount << std::endl;
+    std::cout << "Queue length: " << epidemicQueueLength << " packets"
+    << std::endl;
+    std::cout << "Queue entry expire time: " <<
+    epidemicQueueEntryExpireTime.GetSeconds () << " s" << std::endl;
+    std::cout << "Beacon interval: " << epidemicBeaconInterval.GetSeconds ()
+    << " s" << std::endl;
+    
+    
+    /*
+     *       Enabling OnOffApplication and PacketSink logging
+     */
+    if (app_logging)
+    {
+        LogComponentEnable ("OnOffApplication", ns3::LOG_LEVEL_INFO);
+        LogComponentEnable ("PacketSink", ns3::LOG_LEVEL_INFO);
+        LogComponentEnable ("SprayAndWait", ns3::LOG_LEVEL_INFO);
+        LogComponentEnableAll (ns3::LOG_PREFIX_TIME);
+        LogComponentEnableAll (ns3::LOG_PREFIX_NODE);
+        LogComponentEnableAll (ns3::LOG_PREFIX_FUNC);
+    }
+    
+    
+    
+    LogComponentEnable ("SprayAndWaitExample", LOG_LEVEL_ALL);
+    nodeContainer.Create (nWifis);
+    
+    
+    /*
+     *       Mobility model Setup
+     */
+    MobilityHelper mobility;
+    if (mobility_model == "Grid")
+    {
+        int internode_distance = 100;
+        Ptr<GridPositionAllocator> positionAlloc;
+        positionAlloc = CreateObject<GridPositionAllocator> ();
+        positionAlloc->SetDeltaX (internode_distance);
+        mobility.SetPositionAllocator (positionAlloc);
+        
+    }
+    else if (mobility_model == "RandomWaypoint")
+    {
+        
+        /*
+         *  Nodes initial positions and mobility bounds are based on
+         *  original paper.
+         *  See Docs for more details.
+         */
+        ObjectFactory pos;
+        mobility.SetPositionAllocator ("ns3::RandomRectanglePositionAllocator",
+                                       "X", StringValue ("ns3::UniformRandomVariable[Min=0.0|Max=300.0]"),
+                                       "Y", StringValue ("ns3::UniformRandomVariable[Min=0.0|Max=1500.0]"));
+        
+        mobility.SetMobilityModel ("ns3::SteadyStateRandomWaypointMobilityModel",
+                                   "MinSpeed", DoubleValue (0.01),
+                                   "MaxSpeed", DoubleValue (nodeSpeed),
+                                   "MinX", DoubleValue (0.0),
+                                   "MaxX", DoubleValue (300.0),
+                                   "MinPause", DoubleValue (10),
+                                   "MaxPause", DoubleValue (20),
+                                   "MinY", DoubleValue (0.0),
+                                   "MaxY", DoubleValue (1500.0)
+                                   );
+    }
+    mobility.Install (nodeContainer);
+    
+    
+    /*
+     *       Physical and link Layers Setup
+     */
+    
+    NqosWifiMacHelper wifiMac = NqosWifiMacHelper::Default ();
+    wifiMac.SetType ("ns3::AdhocWifiMac");
+    YansWifiPhyHelper wifiPhy = YansWifiPhyHelper::Default ();
+    YansWifiChannelHelper wifiChannel = YansWifiChannelHelper::Default ();
+    
+    wifiChannel.AddPropagationLoss ("ns3::RangePropagationLossModel",
+                                    "MaxRange", DoubleValue (txpDistance));
+    wifiPhy.SetChannel (wifiChannel.Create ());
+    WifiHelper wifi = WifiHelper::Default ();
+    wifi.SetRemoteStationManager ("ns3::ConstantRateWifiManager",
+                                  "DataMode", StringValue ("OfdmRate6Mbps"),
+                                  "RtsCtsThreshold", UintegerValue (0));
+    devices = wifi.Install (wifiPhy, wifiMac, nodeContainer);
+    
+    /*
+     *       SprayAndWait Routing Setup
+     */
+    SprayAndWaitHelper SprayAndWait;
+    SprayAndWait.Set ("HopCount", UintegerValue (epidemicHopCount));
+    SprayAndWait.Set ("QueueLength", UintegerValue (epidemicQueueLength));
+    SprayAndWait.Set ("QueueEntryExpireTime",
+                  TimeValue (epidemicQueueEntryExpireTime));
+    SprayAndWait.Set ("BeaconInterval", TimeValue (epidemicBeaconInterval));
+    
+    
+    
+    /*
+     *       Internet Stack Setup
+     */
+    Ipv4ListRoutingHelper list;
+    InternetStackHelper internet;
+    internet.SetRoutingHelper (SprayAndWait);
+    internet.Install (nodeContainer);
+    Ipv4AddressHelper ipv4;
+    ipv4.SetBase ("10.1.1.0", "255.255.255.0");
+    Ipv4InterfaceContainer interfaces = ipv4.Assign (devices);
+    
+    
+    /*
+     *         Application Setup
+     */
+    
+    
+    // Sink or server setup
+    PacketSinkHelper sink ("ns3::UdpSocketFactory",
+                           InetSocketAddress (Ipv4Address::GetAny (), 80));
+    ApplicationContainer apps_sink = sink.Install (nodeContainer);
+    apps_sink.Start (Seconds (0.0));
+    apps_sink.Stop (Seconds (appTotaltime));
+    
+    
+    // Client setup
+    Ptr<UniformRandomVariable> random = CreateObject<UniformRandomVariable> ();
+    for (uint32_t i = 0; i < nWifis; ++i)
+    {
+        uint32_t randTarget;
+        for (uint32_t t = 0; t < duration; t += interval)
+        {
+            do{
+                randTarget = random->GetInteger (0, nWifis-1);
+            } while (randTarget == i);
+            OnOffHelper onoff1 ("ns3::UdpSocketFactory",
+                                Address (InetSocketAddress (interfaces.GetAddress (randTarget), 80)));
+            onoff1.SetConstantRate (DataRate (rate), packetSize);
+            onoff1.SetAttribute ("MaxBytes", UintegerValue (packetSize));
+            //onoff1.SetAttribute ("PacketSize", UintegerValue (packetSize));
+            //onoff1.SetAttribute ("Ontime", StringValue ("ns3::ConstantRandomVariable[Constant=1]"));
+            //onoff1.SetAttribute ("Offtime", StringValue ("ns3::ConstantRandomVariable[Constant=100]"));
+            ApplicationContainer apps1 = onoff1.Install (nodeContainer.Get (i));
+            apps1.Start (Seconds (t));
+            apps1.Stop (Seconds (appTotaltime));
+        }
+    }
+    
+    Ptr<FlowMonitor> flowMonitor;
+    FlowMonitorHelper flowHelper;
+    flowMonitor = flowHelper.InstallAll();
+    
+    Simulator::Stop (Seconds (appTotaltime));
+    Simulator::Run ();
+    flowMonitor->CheckForLostPackets ();
+    Simulator::Destroy ();
+    
+    Ptr<Ipv4FlowClassifier> classifier = DynamicCast<Ipv4FlowClassifier> (flowHelper.GetClassifier ());
+    FlowMonitor::FlowStatsContainer stats = flowMonitor->GetFlowStats ();
+    std::cout << "Flow,source,destination,txPackets,txBytes,RxPackets,rxBytes,timeFirstTxPacket,timeLastRxPacket,lostPackets" << std::endl;
+    for (std::map<FlowId, FlowMonitor::FlowStats>::const_iterator i = stats.begin(); i != stats.end(); ++i)
+    {
+        Ipv4FlowClassifier::FiveTuple t = classifier->FindFlow(i->first);
+        std::cout << i->first << "," << t.sourceAddress << "," << t.destinationAddress << "," << i->second.txPackets << "," << i->second.txBytes << "," << i->second.rxPackets << "," << i->second.rxBytes << "," << i->second.timeFirstTxPacket.GetNanoSeconds() << "," << i->second.timeLastRxPacket.GetNanoSeconds() << "," << i->second.lostPackets;
+        std::cout << std::endl;
+    }
+    return 0;
+}
+
+

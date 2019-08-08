@@ -1,0 +1,62 @@
+void
+sprayandwait::SendDisjointPackets (SummaryVectorHeader packet_SMV,
+                                      Ipv4Address dest)
+{
+  NS_LOG_FUNCTION (this << dest);
+  /*
+  This function is used to find send the packets listed in the vector list
+  */
+  SummaryVectorHeader list = m_queue.FindDisjointPackets (packet_SMV);
+  /*
+  To avoid collisions, packets are sent with incrementalTimeSlot
+  Milliseconds apart
+  */
+  uint16_t incrementalTimeSlot = 0;
+
+  for (std::vector<uint32_t>::iterator
+       i = list.m_packets.begin ();
+       i  != list.m_packets.end ();
+       ++i)
+    {
+      QueueEntry newEntry = m_queue.Find (*i);
+      QueueEntry copyEntry = m_queue.Find (*i);
+      //accesses Ipv4Header which has the variable m_destination, the final destination for the packets
+      Ipv4Header header = copyEntry.GetIpv4Header ();
+      Ptr<Ipv4Route> rt = Create<Ipv4Route> ();
+      rt->SetDestination (header.GetDestination ());
+
+      SprayAndWaitHeader new_sprayandwaitHeader;
+	  Ptr<const ns3::Packet> c = copyEntry.GetPacket ();
+	  Ptr<ns3::Packet> copyone = c->Copy ();
+	  copyone->PeekHeader (new_sprayandwaitHeader);
+
+      if (newEntry.GetPacket () && (dest == header.GetDestination() || new_sprayandwaitHeader.GetCopiesCount() > 1))
+      {
+    		  //edits the header for the number of copies that is sent from the node
+			  SprayAndWaitHeader copy_sprayandwaitHeader;
+			  Ptr<const ns3::Packet> q = copyEntry.GetPacket ();
+			  Ptr<ns3::Packet> copy = q->Copy ();
+			  copy->RemoveHeader (copy_sprayandwaitHeader);
+			  copy_sprayandwaitHeader.SetCopiesCount (1);
+			  copy->AddHeader (copy_sprayandwaitHeader);
+			  copyEntry.SetPacket(copy);
+
+			  //NS_LOG_FUNCTION (this << "?" << copy_sprayandwaitHeader.GetCopiesCount () << m_mainAddress.Get() << copy_sprayandwaitHeader.GetPacketID());
+
+			  //edits the header for the packet that gets sent to another node
+			  Ptr<const ns3::Packet> p = newEntry.GetPacket ();
+			  Simulator::Schedule (MilliSeconds (incrementalTimeSlot++),
+								   &sprayandwait::SendPacketFromQueue,
+								   this,dest, copyEntry);
+			  Ptr<Packet> newcopy = p->Copy ();
+			  SprayAndWaitHeader current_sprayandwaitHeader;
+			  newcopy->RemoveHeader (current_sprayandwaitHeader);
+			  current_sprayandwaitHeader.SetCopiesCount (current_sprayandwaitHeader.GetCopiesCount() - 1);
+			  newcopy->AddHeader (current_sprayandwaitHeader);
+			  newEntry.SetPacket(newcopy);
+			  m_queue.Enqueue(newEntry);
+
+			  //NS_LOG_FUNCTION (this <<"!" << current_sprayandwaitHeader.GetCopiesCount () << m_mainAddress.Get() << current_sprayandwaitHeader.GetPacketID());
+      }
+}
+}

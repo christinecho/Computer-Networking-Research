@@ -1,0 +1,463 @@
+/*
+ * test.cpp
+ *
+ *  Created on: Jul 2, 2015
+ *      Author: christine
+ *
+ * Our goal is to make a hybrid of epidemic routing methods, where it first looks for an end to end connection from source to destination, and if that doesn’t exist, resorts to epidemic routing. This will ensure that our routing method cannot be any worse than pre existing routing methods.
+First we will use the AODV routing protocol. The way AODV works is that it sends flooding messages (not with packets, this way it’s not clogging up the networks) to all of the nearby nodes and seeing if it can a path to the destination. If it finds the destination it will build the fastest path to the destination to deliver the packets. If it can not find the destination it will give up and try again later. We are going to make our hybrid by taking out the “try again later,” and instead replacing with the epidemic routing protocol. Epidemic routing works by flooding the nearby nodes (with packets) and then having those nodes flood there nearby nodes and etc until the final destination is reached with packets. Since we already know the the nodes closest to the starting node aren’t close by to the destination, our program will work so that only the nodes on the outer edge receive packets and start moving and giving packets to nodes on the outside of them. This is more efficient because useless copies of packets are not made and less nodes are flooded.
+ *
+ */
+//include libraries
+#include "test.h"
+#include "epidemic-packet-queue.h"
+#include "epidemic-packet.h"
+#include "ns3/random-variable-stream.h"
+#include "epidemic-routing-protocol.h"
+#include "epidemic-routing-protocol.cc"
+#include "epidemic-tag.h"
+#include <vector>
+#include "ns3/boolean.h"
+#include "ns3/config.h"
+#include "ns3/node.h"
+#include "ns3/ipv4-routing-protocol.h"
+#include "ns3/inet-socket-address.h"
+#include "ns3/ipv4-interface.h"
+#include "ns3/ipv4-l3-protocol.h"
+#include "ns3/output-stream-wrapper.h"
+#include "ns3/timer.h"
+#include <iostream>
+#include <algorithm>
+#include <functional>
+#include "ns3/ipv4-route.h"
+#include "ns3/socket.h"
+#include "ns3/log.h"
+#include "ns3/aodv-routing-protocol.h"
+#include "ns3/boolean.h"
+#include "ns3/trace-source-accessor.h"
+#include "ns3/udp-socket-factory.h"
+#include "ns3/wifi-net-device.h"
+#include "ns3/adhoc-wifi-mac.h"
+#include "ns3/string.h"
+#include "ns3/pointer.h"
+#include <limits>
+
+using namespace std;
+
+namespace ns3 {
+NS_LOG_COMPONENT_DEFINE ("HybridTest");
+
+namespace Epidemic {
+
+NS_OBJECT_ENSURE_REGISTERED (test);
+
+test::test () :
+  RreqRetries (2),
+  RreqRateLimit (10),
+  RerrRateLimit (10),
+  ActiveRouteTimeout (Seconds (3)),
+  NetDiameter (35),
+  NodeTraversalTime (MilliSeconds (40)),
+  NetTraversalTime (Time ((2 * NetDiameter) * NodeTraversalTime)),
+  PathDiscoveryTime ( Time (2 * NetTraversalTime)),
+  MyRouteTimeout (Time (2 * std::max (PathDiscoveryTime, ActiveRouteTimeout))),
+  HelloInterval (Seconds (1)),
+  AllowedHelloLoss (2),
+  DeletePeriod (Time (5 * std::max (ActiveRouteTimeout, HelloInterval))),
+  NextHopWait (NodeTraversalTime + MilliSeconds (10)),
+  BlackListTimeout (Time (RreqRetries * NetTraversalTime)),
+  MaxQueueLen (64),
+  MaxQueueTime (Seconds (30)),
+  DestinationOnly (false),
+  GratuitousReply (true),
+  EnableHello (false),
+  m_routingTable (DeletePeriod),
+ // m_queue (MaxQueueLen, MaxQueueTime),
+  m_requestId (0),
+  m_seqNo (0),
+  m_rreqIdCache (PathDiscoveryTime),
+  m_dpd (PathDiscoveryTime),
+  m_nb (HelloInterval),
+  m_rreqCount (0),
+  m_rerrCount (0),
+  m_hopCount(0),
+  m_maxQueueLen(0),
+  EnableBroadcast(true),
+  m_dataPacketCounter(0),
+  m_beaconMaxJitterMs(0),
+ // m_htimer (Timer::CANCEL_ON_DESTROY),
+ // m_rreqRateLimitTimer (Timer::CANCEL_ON_DESTROY),
+ // m_rerrRateLimitTimer (Timer::CANCEL_ON_DESTROY),
+  m_lastBcastTime (Seconds (0))
+{
+  m_nb.SetCallback (MakeCallback (&test::SendRerrWhenBreaksLinkToNextHop, this));
+}
+
+TypeId test::GetTypeId (void)
+{
+	static TypeId tid = TypeId ("ns3::Epidemic::test")
+		.SetParent<Ipv4RoutingProtocol> ()
+		.AddConstructor<test> ()
+		//.SetGroupName("Hybrid")
+		//epidemic attributes
+		.AddAttribute ("HopCount","Maximum number of times "
+						   "a packet will be flooded.",
+						   UintegerValue (64),
+						   MakeUintegerAccessor (&test::m_hopCount),
+						   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("QueueLength","Maximum number of "
+						   "packets that a queue can hold.",
+						   UintegerValue (64),
+						   MakeUintegerAccessor (&test::m_maxQueueLen),
+						   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("QueueEntryExpireTime","Maximum time a packet can live in "
+						   "the epidemic queues since it's generated at the source.",
+						   TimeValue (Seconds (100)),
+						   MakeTimeAccessor (&test::m_queueEntryExpireTime),
+						   MakeTimeChecker ())
+		.AddAttribute ("HostRecentPeriod","Time in seconds for host recent period"
+						   ", in which hosts can not re-exchange summary vectors.",
+						   TimeValue (Seconds (10)),
+						   MakeTimeAccessor (&test::m_hostRecentPeriod),
+						   MakeTimeChecker ())
+		.AddAttribute ("BeaconInterval","Time in seconds after which a "
+						   "beacon packet is broadcast.",
+						   TimeValue (Seconds (1)),
+						   MakeTimeAccessor (&test::m_beaconInterval),
+						   MakeTimeChecker ())
+		.AddAttribute ("BeaconRandomness","Upper bound of the uniform distribution"
+						   " random time added to avoid collisions. Measured in milliseconds",
+						   UintegerValue (100),
+						   MakeUintegerAccessor (&test::m_beaconMaxJitterMs),
+						   MakeUintegerChecker<uint32_t> ())
+
+		//aodv attributes
+		.AddAttribute ("HelloInterval", "HELLO messages emission interval.",
+				   TimeValue (Seconds (1)),
+				   MakeTimeAccessor (&test::HelloInterval),
+				   MakeTimeChecker ())
+		.AddAttribute ("RreqRetries", "Maximum number of retransmissions of RREQ to discover a route",
+				   UintegerValue (2),
+				   MakeUintegerAccessor (&test::RreqRetries),
+				   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("RreqRateLimit", "Maximum number of RREQ per second.",
+					   UintegerValue (10),
+					   MakeUintegerAccessor (&test::RreqRateLimit),
+					   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("RerrRateLimit", "Maximum number of RERR per second.",
+					   UintegerValue (10),
+					   MakeUintegerAccessor (&test::RerrRateLimit),
+					   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("NodeTraversalTime", "Conservative estimate of the average one hop traversal time for packets and should include "
+					   "queuing delays, interrupt processing times and transfer times.",
+					   TimeValue (MilliSeconds (40)),
+					   MakeTimeAccessor (&test::NodeTraversalTime),
+					   MakeTimeChecker ())
+		.AddAttribute ("NextHopWait", "Period of our waiting for the neighbour's RREP_ACK = 10 ms + NodeTraversalTime",
+					   TimeValue (MilliSeconds (50)),
+					   MakeTimeAccessor (&test::NextHopWait),
+					   MakeTimeChecker ())
+		.AddAttribute ("ActiveRouteTimeout", "Period of time during which the route is considered to be valid",
+					   TimeValue (Seconds (3)),
+					   MakeTimeAccessor (&test::ActiveRouteTimeout),
+					   MakeTimeChecker ())
+		.AddAttribute ("MyRouteTimeout", "Value of lifetime field in RREP generating by this node = 2 * max(ActiveRouteTimeout, PathDiscoveryTime)",
+					   TimeValue (Seconds (11.2)),
+					   MakeTimeAccessor (&test::MyRouteTimeout),
+					   MakeTimeChecker ())
+		.AddAttribute ("BlackListTimeout", "Time for which the node is put into the blacklist = RreqRetries * NetTraversalTime",
+					   TimeValue (Seconds (5.6)),
+					   MakeTimeAccessor (&test::BlackListTimeout),
+					   MakeTimeChecker ())
+		.AddAttribute ("DeletePeriod", "DeletePeriod is intended to provide an upper bound on the time for which an upstream node A "
+					   "can have a neighbor B as an active next hop for destination D, while B has invalidated the route to D."
+					   " = 5 * max (HelloInterval, ActiveRouteTimeout)",
+					   TimeValue (Seconds (15)),
+					   MakeTimeAccessor (&test::DeletePeriod),
+					   MakeTimeChecker ())
+		.AddAttribute ("NetDiameter", "Net diameter measures the maximum possible number of hops between two nodes in the network",
+					   UintegerValue (35),
+					   MakeUintegerAccessor (&test::NetDiameter),
+					   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("NetTraversalTime", "Estimate of the average net traversal time = 2 * NodeTraversalTime * NetDiameter",
+					   TimeValue (Seconds (2.8)),
+					   MakeTimeAccessor (&test::NetTraversalTime),
+					   MakeTimeChecker ())
+		.AddAttribute ("PathDiscoveryTime", "Estimate of maximum time needed to find route in network = 2 * NetTraversalTime",
+					   TimeValue (Seconds (5.6)),
+					   MakeTimeAccessor (&test::PathDiscoveryTime),
+					   MakeTimeChecker ())
+		.AddAttribute ("MaxQueueLen", "Maximum number of packets that we allow a routing protocol to buffer.",
+					   UintegerValue (64),
+					   MakeUintegerAccessor (&test::SetMaxQueueLen,
+											 &test::GetMaxQueueLen),
+					   MakeUintegerChecker<uint32_t> ())
+		.AddAttribute ("MaxQueueTime", "Maximum time packets can be queued (in seconds)",
+					   TimeValue (Seconds (30)),
+					   MakeTimeAccessor (&test::SetMaxQueueTime,
+										 &test::GetMaxQueueTime),
+					   MakeTimeChecker ())
+		.AddAttribute ("AllowedHelloLoss", "Number of hello messages which may be loss for valid link.",
+					   UintegerValue (2),
+					   MakeUintegerAccessor (&test::AllowedHelloLoss),
+					   MakeUintegerChecker<uint16_t> ())
+		.AddAttribute ("GratuitousReply", "Indicates whether a gratuitous RREP should be unicast to the node originated route discovery.",
+					   BooleanValue (true),
+					   MakeBooleanAccessor (&test::SetGratuitousReplyFlag,
+											&test::GetGratuitousReplyFlag),
+					   MakeBooleanChecker ())
+		.AddAttribute ("DestinationOnly", "Indicates only the destination may respond to this RREQ.",
+					   BooleanValue (false),
+					   MakeBooleanAccessor (&test::SetDesinationOnlyFlag,
+											&test::GetDesinationOnlyFlag),
+					   MakeBooleanChecker ())
+		.AddAttribute ("EnableHello", "Indicates whether a hello messages enable.",
+					   BooleanValue (true),
+					   MakeBooleanAccessor (&test::SetHelloEnable,
+											&test::GetHelloEnable),
+					   MakeBooleanChecker ())
+		.AddAttribute ("EnableBroadcast", "Indicates whether a broadcast data packets forwarding enable.",
+					   BooleanValue (true),
+					   MakeBooleanAccessor (&test::SetBroadcastEnable,
+											&test::GetBroadcastEnable),
+					   MakeBooleanChecker ())
+		.AddAttribute ("UniformRv",
+					   "Access to the underlying UniformRandomVariable",
+					   StringValue ("ns3::UniformRandomVariable"),
+					   MakePointerAccessor (&test::m_uniformRandomVariable),
+					   MakePointerChecker<UniformRandomVariable> ());
+
+		return tid;
+}
+
+RoutingProtocol::~RoutingProtocol ()
+{
+}
+
+void
+RoutingProtocol::DoDispose ()
+{
+  m_ipv4 = 0;
+  for (std::map<Ptr<Socket>, Ipv4InterfaceAddress>::iterator iter =
+         m_socketAddresses.begin (); iter != m_socketAddresses.end (); iter++)
+    {
+      iter->first->Close ();
+    }
+  m_socketAddresses.clear ();
+  for (std::map<Ptr<Socket>, Ipv4InterfaceAddress>::iterator iter =
+		  //m_socketSubnetBroadcastAddresses in my test.h?!
+         m_socketSubnetBroadcastAddresses.begin (); iter != m_socketSubnetBroadcastAddresses.end (); iter++)
+    {
+      iter->first->Close ();
+    }
+  m_socketSubnetBroadcastAddresses.clear ();
+  Ipv4RoutingProtocol::DoDispose ();
+}
+
+Ptr<Ipv4Route>
+RoutingProtocol::RouteOutput (Ptr<Packet> p,
+                              const Ipv4Header &header,
+                              Ptr<NetDevice> oif,
+                              Socket::SocketErrno &sockerr)
+{
+
+  NS_LOG_FUNCTION (this << p << header << oif << sockerr);
+  NS_LOG_LOGIC (this << "Packet Size" << p->GetSize ()
+                     << " Packet " << p->GetUid ()
+                     << " reached node " << m_mainAddress << " source  " << header.GetSource ()
+                     << " going to " << header.GetDestination ());
+
+
+  if (IsMyOwnAddress (header.GetDestination ()))
+    {
+      NS_LOG_LOGIC ("Local delivery a packet" << p->GetUid ()
+                                              << " has arrived destination "
+                                              << " At node " << m_mainAddress << "  " << header);
+      Ptr<Ipv4Route> rt = Create<Ipv4Route> ();
+      rt->SetSource (m_mainAddress);
+      rt->SetDestination (header.GetDestination ());
+      return rt;
+    }
+  else
+    {
+      Ptr<Ipv4Route> rt = Create<Ipv4Route> ();
+      rt->SetSource (m_mainAddress);
+      rt->SetDestination (header.GetDestination ());
+      rt->SetGateway (header.GetDestination ());
+
+      if (m_ipv4->GetInterfaceForAddress (m_mainAddress) != -1)
+        {
+          /*
+           *  Control packets generated at this node, are
+           *  tagged with ControlTag.
+           *  They are removed before local delivery in RouteInput function.
+           */
+          ControlTag tag;
+          p->PeekPacketTag (tag);
+          if (  tag.GetTagType () == ControlTag::CONTROL)
+            {
+              /*
+               * if the packet is not control, it means a data packet
+               * Thus, data packet is supposed to be looped back to
+               * store it in the epidemic queue.
+               */
+              rt->SetOutputDevice (m_ipv4->GetNetDevice (FindLoopbackDevice ()));
+            }
+          else
+            {
+              /*
+               * if the packet is control packet
+               * Thus, find the corresponding output device
+               */
+              NS_LOG_DEBUG ( "Epidemic triggered packets :" <<
+                             header.GetDestination ()  << "  found " <<
+                             FindOutputDeviceForAddress (header.GetDestination ()));
+              rt->SetOutputDevice (m_ipv4->GetNetDevice (
+                                     FindOutputDeviceForAddress (header.GetDestination ())));
+            }
+        }
+      return rt;
+    }
+
+}
+//implement route input here
+
+//implemented
+void
+RoutingProtocol::PrintRoutingTable (Ptr<OutputStreamWrapper> stream) const
+{
+
+	*stream->GetStream () << "Node: " << m_ipv4->GetObject<Node> ()->GetId () << " Time: " << Simulator::Now ().GetSeconds () << "s ";
+	  test::m_routingTable.Print (stream);
+}
+
+void
+RoutingProtocol::NotifyInterfaceUp (uint32_t i)
+{
+  NS_LOG_FUNCTION (this << i);
+  Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol> ();
+  Ipv4InterfaceAddress iface = l3->GetAddress (i,0);
+  if (iface.GetLocal () == Ipv4Address ("127.0.0.1"))
+    {
+      return;
+    }
+  if (m_mainAddress == Ipv4Address ())
+    {
+      m_mainAddress = iface.GetLocal ();
+    }
+
+  /*
+  Create a socket to be used for epidemic routing port
+  */
+  TypeId tid = TypeId::LookupByName ("ns3::UdpSocketFactory");
+  Ptr<Socket> socket = Socket::CreateSocket (GetObject<Node> (),tid);
+  socket->SetRecvCallback (MakeCallback (&RoutingProtocol::RecvEpidemic,this));
+  socket->Bind (InetSocketAddress (Ipv4Address::GetAny (), EPIDEMIC_PORT));
+  socket->BindToNetDevice (l3->GetNetDevice (i));
+  socket->SetAllowBroadcast (true);
+  m_socketAddresses.insert (std::make_pair (socket,iface));
+}
+
+void
+RoutingProtocol::NotifyInterfaceDown (uint32_t i)
+{
+  NS_LOG_FUNCTION (this << m_ipv4->GetAddress (i, 0).GetLocal ());
+  // Disable layer 2 link state monitoring (if possible)
+  Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol> ();
+  Ptr<NetDevice> dev = l3->GetNetDevice (i);
+  // Close socket
+  Ptr<Socket> socket = FindSocketWithInterfaceAddress (
+      m_ipv4->GetAddress (i, 0));
+  NS_ASSERT (socket);
+  socket->Close ();
+  m_socketAddresses.erase (socket);
+}
+
+void
+RoutingProtocol::NotifyAddAddress (uint32_t i,Ipv4InterfaceAddress address)
+{
+  NS_LOG_FUNCTION (this << i << address);
+  Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol> ();
+  if (!l3->IsUp (i))
+    {
+      return;
+    }
+  if (l3->GetNAddresses (i) == 1)
+    {
+      Ipv4InterfaceAddress iface = l3->GetAddress (i, 0);
+      Ptr<Socket> socket = FindSocketWithInterfaceAddress (iface);
+      if (!socket)
+        {
+          if (iface.GetLocal () == Ipv4Address ("127.0.0.1"))
+            {
+              return;
+            }
+          // Create a socket to listen only on this interface
+          Ptr<Socket> socket =
+            Socket::CreateSocket (GetObject<Node> (),
+                                  UdpSocketFactory::GetTypeId ());
+          NS_ASSERT (socket != 0);
+          socket->SetRecvCallback (
+            MakeCallback (&RoutingProtocol::RecvEpidemic,this));
+          socket->Bind (InetSocketAddress (Ipv4Address::GetAny (),
+                                           EPIDEMIC_PORT));
+          socket->BindToNetDevice (l3->GetNetDevice (i));
+          socket->SetAllowBroadcast (true);
+          m_socketAddresses.insert (std::make_pair (socket, iface));
+        }
+    }
+  else
+    {
+      NS_LOG_LOGIC ("Epidemic does not work with more then "
+                    "one address per each interface. Ignore added address");
+    }
+
+}
+
+void
+RoutingProtocol::NotifyRemoveAddress (uint32_t i,Ipv4InterfaceAddress address)
+
+{
+
+  NS_LOG_FUNCTION (this << i << address);
+  Ptr<Socket> socket = FindSocketWithInterfaceAddress (address);
+  if (socket)
+    {
+      m_socketAddresses.erase (socket);
+      Ptr<Ipv4L3Protocol> l3 = m_ipv4->GetObject<Ipv4L3Protocol> ();
+      if (l3->GetNAddresses (i))
+        {
+          Ipv4InterfaceAddress iface = l3->GetAddress (i, 0);
+          // Create a socket to listen only on this interface
+          Ptr<Socket> socket = Socket::CreateSocket (GetObject<Node> (),
+                                                     UdpSocketFactory::GetTypeId ());
+          NS_ASSERT (socket != 0);
+          socket->SetRecvCallback (
+            MakeCallback (&RoutingProtocol::RecvEpidemic,this));
+          // Bind to any IP address so that broadcasts can be received
+          socket->Bind (InetSocketAddress (
+                          Ipv4Address::GetAny (), EPIDEMIC_PORT));
+          socket->SetAllowBroadcast (true);
+          m_socketAddresses.insert (std::make_pair (socket, iface));
+
+        }
+
+    }
+  else
+    {
+      NS_LOG_LOGIC ("Remove address not participating in Epidemic operation");
+    }
+}
+
+void
+
+RoutingProtocol::SetIpv4 (Ptr<Ipv4> ipv4)
+{
+  NS_LOG_FUNCTION (this << ipv4);
+  m_ipv4 = ipv4;
+  Simulator::ScheduleNow (&RoutingProtocol::Start,this);
+}
+
+}
+
+} /* namespace std */
